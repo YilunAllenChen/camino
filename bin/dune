@@ -1,0 +1,4 @@
+(executable
+ (public_name camino)
+ (name main)
+ (libraries camino))
