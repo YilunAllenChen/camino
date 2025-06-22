@@ -1,1 +1,3 @@
-let () = print_endline "Hello, World!"
+open Camino
+
+let () = Pathfinding.hi
