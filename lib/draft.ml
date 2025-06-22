@@ -3,7 +3,14 @@ open Incremental
 module Inc = Incremental.Make ()
 
 type node = { id : int } [@@deriving sexp]
-type edge = { left : node; right : node; distance : float } [@@deriving sexp]
+
+type edge =
+  { left : node
+  ; right : node
+  ; distance : float
+  }
+[@@deriving sexp]
+
 type graph = { edges : edge list } [@@deriving sexp]
 
 let hi =
@@ -17,3 +24,4 @@ let hi =
   Inc.Var.set myvar 20;
   Inc.stabilize ();
   Inc.Observer.value seen |> Or_error.ok_exn |> Int.to_string |> print_endline
+;;

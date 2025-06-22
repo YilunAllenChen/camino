@@ -3,5 +3,5 @@
  (preprocess
   (pps ppx_sexp_conv ppx_compare ppx_hash))
  (name camino)
- (modules camino pathfinding dbg)
+ (modules camino pathfinding dbg market_data instrument)
  )

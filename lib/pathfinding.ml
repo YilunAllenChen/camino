@@ -1,90 +1,78 @@
 open Core
+open Instrument
+open Market_data
 
-module Instrument = struct
-  module T = struct
-    type t = Future of string | Spread of string * string
-    [@@deriving sexp, compare, hash]
-  end
+let taker_price (quote : Quote.t) = function
+  | Bid -> quote.ask
+  | Ask -> quote.bid |> Option.map ~f:Float.neg
+;;
 
-  include T
-  include Comparable.Make (T)
-  include Hashable.Make (T)
-end
-
-type quote = {
-  ticker : string;
-  instrument : Instrument.t;
-  bid : float option;
-  ask : float option;
-}
-[@@deriving sexp]
-
-let parse_level (str : string) : float option =
-  match String.strip str with
-  | "None" -> None
-  | other -> Float.of_string_opt other
-
-let parse_instrument (ticker : string) : (Instrument.t, string) Result.t =
-  let splitted_on_dash = String.split ~on:'-' ticker in
-  match splitted_on_dash with
-  | [] -> Error ("Impossible: " ^ ticker)
-  | [ single ] -> Ok (Future single)
-  | [ front; back ] -> Ok (Spread (front, back))
-  | _ -> Error ("Unsupported: " ^ ticker)
-
-let line_pattern = Re.Pcre.regexp {|^([A-Z0-9-]+)( [\d\w\.-]+)( [\d\w\.-]+)|}
-
-let parse_line (line : string) : (quote, string) Result.t =
-  let maybe_groups = Re.exec_opt line_pattern line in
-  match maybe_groups with
-  | Some groups ->
-      let substrs = Re.Group.all groups in
-      let maybe_ins = parse_instrument substrs.(1) in
-      Result.map maybe_ins ~f:(fun ins ->
-          {
-            ticker = substrs.(1);
-            instrument = ins;
-            bid = parse_level substrs.(2);
-            ask = parse_level substrs.(3);
-          })
-  | None -> Error ("can't parse line: " ^ line)
-
-module InstrumentSet = Set.Make (Instrument)
-
-type path = { legs : Instrument.t list } [@@deriving sexp]
-
-let find_end_with (target : string) (from : InstrumentSet.t) : Instrument.t list
-    =
-  Set.filter from ~f:(function
+let find_end_with (target : string) (set : InstrumentSet.t) : Instrument.t list =
+  Set.filter set ~f:(function
     | Future fut -> String.equal target fut
     | Spread (_, back) -> String.equal target back)
   |> Set.to_list
+;;
 
 let pathfind (target : Instrument.t) (set : InstrumentSet.t) : path list =
-  let rec aux_fut (acc : path list) (wip : Instrument.t list)
-      (curr : Instrument.t) =
+  let rec aux_fut (acc : path list) (wip : Instrument.t list) (curr : Instrument.t) =
     match curr with
     | Future _ -> { legs = wip } :: acc
     | Spread (front, _) ->
-        let next_hops = find_end_with front set in
-        List.fold ~init:acc next_hops ~f:(fun acc hop ->
-            aux_fut acc (hop :: wip) hop)
+      let next_hops = find_end_with front set in
+      List.fold ~init:acc next_hops ~f:(fun acc hop -> aux_fut acc (hop :: wip) hop)
   in
   match target with
   | Future future ->
-      let starts = find_end_with future set in
-      List.fold starts ~init:[] ~f:(fun acc start ->
-          aux_fut acc [ start ] start)
+    let starts = find_end_with future set in
+    List.fold starts ~init:[] ~f:(fun acc start -> aux_fut acc [ start ] start)
   | Spread _ -> failwith "Unsupported"
+;;
+
+let cost_of (path : path) (book : Quote.t InstrumentMap.t) : float Or_error.t =
+  let side_for = function
+    | Instrument.Future _ -> Bid
+    | Instrument.Spread _ -> Ask
+  in
+  let maybe_quotes = List.map path.legs ~f:(fun leg -> Map.find_or_error book leg) in
+  match Or_error.all maybe_quotes with
+  | Ok quotes ->
+    List.fold quotes ~init:(Ok 0.0) ~f:(fun acc quote ->
+      Result.bind acc ~f:(fun inner ->
+        let side = side_for quote.instrument in
+        let missing_market = Error.of_string ("No market on " ^ quote.ticker) in
+        let maybe_px = Result.of_option (taker_price quote side) ~error:missing_market in
+        Result.map maybe_px ~f:(fun px -> px +. inner)))
+  | Error err -> Error err
+;;
+
+let find_best_path_for (instrument : Instrument.t) (book : Quote.t InstrumentMap.t) =
+  let ins_set = InstrumentSet.of_list (Map.keys book) in
+  let paths = pathfind instrument ins_set in
+  let evals = List.map paths ~f:(fun path -> path, cost_of path book) in
+  let valid_paths =
+    List.filter_map evals ~f:(fun (path, eval) ->
+      match eval with
+      | Ok cost -> Some (path, cost)
+      | Error _ -> None)
+  in
+  List.min_elt valid_paths ~compare:(fun (_, lcost) (_, rcost) ->
+    Float.compare lcost rcost)
+;;
 
 let hi =
+  print_endline "\n==Camino==";
   let test_data = In_channel.read_lines "data/test" in
-  print_endline "\n\n==Camino==";
   let quotes =
-    test_data |> List.map ~f:parse_line |> List.filter_map ~f:Result.ok
+    test_data |> List.filter_map ~f:(fun line -> line |> parse_line |> Result.ok)
   in
-  let ins_set =
-    InstrumentSet.of_list (List.map quotes ~f:(fun q -> q.instrument))
-  in
-  let res = pathfind (Future "CLZ5") ins_set in
-  res |> Dbg.print [%sexp_of: path list]
+  let book = build_book InstrumentMap.empty quotes in
+  let instrument = Instrument.Future "CLZ5" in
+  match find_best_path_for instrument book with
+  | Some (path, cost) ->
+    print_endline
+      ("Best path to get to " ^ (instrument |> Dbg.tostr [%sexp_of: Instrument.t]));
+    path |> Dbg.print [%sexp_of: path];
+    print_endline ("Where cost is: " ^ Float.to_string cost)
+  | None -> failwith "no path"
+;;
